@@ -1,0 +1,7 @@
+fastapi==0.111.0
+pydantic-settings==2.8.0
+aiohttp==3.11.13
+sentry-sdk[fastapi]==2.27.0
+sqlalchemy[asyncio]==2.0.39
+asyncpg==0.30.0
+aio-pika==9.5.5

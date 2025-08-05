@@ -1,0 +1,72 @@
+services:
+  billing-db-test:
+    build: 
+      context: ../../../
+      dockerfile: Dockerfile.postgres   # c pg_partman
+    container_name: billing-db-test
+    env_file:
+      - .env
+    environment:
+      POSTGRES_DB: ${BILLING_DB_TEST_NAME:-test_billing}
+      POSTGRES_USER: ${BILLING_DB_TEST_USER:-test}
+      POSTGRES_PASSWORD: ${BILLING_DB_TEST_PASSWORD:-test}
+    ports:
+      - ${BILLING_DB_TEST_PORT}:${BILLING_DB_TEST_PORT}
+    command: -p ${BILLING_DB_TEST_PORT}
+    volumes:
+      - billing_db:/var/lib/postgresql/data/
+      - ../../../billing_database.ddl:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${BILLING_DB_TEST_USER} -d ${BILLING_DB_TEST_NAME} -p ${BILLING_DB_TEST_PORT}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  billing-service-test:
+    build:
+      context: ../../../billing_service
+      dockerfile: Dockerfile
+    container_name: billing-service-test
+    env_file:
+      - .env
+    environment:
+      APP_ENV: TEST
+      BILLING_DB_HOST: ${BILLING_DB_TEST_HOST:-billing-db-test}
+      BILLING_DB_PORT: ${BILLING_DB_TEST_PORT:-5439}
+      BILLING_DB_NAME: ${BILLING_DB_TEST_NAME:-test_billing}
+      BILLING_DB_USER: ${BILLING_DB_TEST_USER:-test}
+      BILLING_DB_PASSWORD: ${BILLING_DB_TEST_PASSWORD:-test}
+    ports:
+      - ${BILLING_SERVICE_TEST_PORT}:${BILLING_SERVICE_TEST_PORT}
+    healthcheck: 
+      test: ["CMD", "curl", "-f", "http://${BILLING_SERVICE_TEST_HOST}:${BILLING_SERVICE_TEST_PORT}/api/v1/billing/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    depends_on:
+      billing-db-test:
+        condition: service_healthy
+
+  billing-tests:
+    image: python:3.10-slim
+    container_name: billing-tests
+    volumes:
+      - ../../../billing_service/src:/app/src
+      - .:/app/tests
+    working_dir: /app/tests
+    environment:
+      PYTHONPATH: "/app/src:/app/tests"
+      BILLING_SERVICE_URL: "http://${BILLING_SERVICE_TEST_HOST}:${BILLING_SERVICE_TEST_PORT}"
+      DB_URL: "postgresql://${BILLING_DB_TEST_USER}:${BILLING_DB_TEST_PASSWORD}@${BILLING_DB_TEST_HOST}:${BILLING_DB_TEST_PORT}/${BILLING_DB_TEST_NAME}"
+      BILLING_API_SECRET_KEY: "INTERNAL_BILLING_SECRET_KEY"
+    depends_on:
+      billing-service-test:
+        condition: service_healthy
+    command: >
+      sh -c "pip install -r /app/tests/requirements.txt &&
+           python /app/tests/utils/wait_for_db.py &&
+           pytest /app/tests/src -v"
+
+
+volumes:
+  billing_db:

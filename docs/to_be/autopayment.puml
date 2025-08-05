@@ -1,0 +1,49 @@
+@startuml autopayment
+title Схема оплаты с подпиской (автоплатёж)
+
+actor Клиент as Client
+participant "Billing-API" as BillingAPI
+participant "YooKassa" as YooKassa
+
+Client -> BillingAPI: Запрос на подписку
+activate BillingAPI
+
+BillingAPI -> YooKassa: Создание платежа\n(Idempotence-Key,\nsave_payment_method=True)\n\nДоступно только после согласования\nс менеджером ЮKassa.
+activate YooKassa
+
+YooKassa --> BillingAPI: Получение id и confirmation_url
+deactivate YooKassa
+
+BillingAPI -> Client: Перенаправление на оплату
+
+Client -> YooKassa: Ввод карты и подтверждение
+activate YooKassa
+
+YooKassa -> BillingAPI: Webhook (payment.succeeded)
+
+loop Webhook недоступен
+    BillingAPI -> YooKassa: Проверка статуса платежа
+    YooKassa --> BillingAPI: Ответ с результатом
+    note right of BillingAPI
+        Касса 24 часа будет пытаться переотправить хук.
+        Наше приложение должно ответить 200, чтобы она перестала.
+    end note
+end
+
+deactivate YooKassa
+
+BillingAPI -> YooKassa: Запрос деталей платежа\n(сохраняем payment_method.id)
+activate YooKassa
+YooKassa --> BillingAPI: Ответ с деталями
+deactivate YooKassa
+
+loop Каждый период
+    BillingAPI -> YooKassa: Новый платеж\n(по payment_method.id)
+    activate YooKassa
+    YooKassa --> BillingAPI: Webhook с результатом
+    deactivate YooKassa
+end
+
+deactivate BillingAPI
+
+@enduml

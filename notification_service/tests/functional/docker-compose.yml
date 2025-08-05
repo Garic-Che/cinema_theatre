@@ -1,0 +1,81 @@
+services:
+  notification-service:
+    build: ../../.
+    image: notification-image
+    container_name: notification-service
+    env_file:
+      - .env
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://${NOTIFICATION_SERVICE_HOST}:${NOTIFICATION_SERVICE_PORT}/api/v1/notification/openapi" ]
+      interval: 5s
+      timeout: 10s
+      retries: 10
+    depends_on:
+      notification-db:
+        condition: service_healthy
+      notification-broker:
+        condition: service_healthy
+
+  notification-db:
+    build: 
+      context: ../../../
+      dockerfile: Dockerfile.postgres   # c pg_partman
+    container_name: notification-db
+    restart: always
+    volumes:
+      - notification_db:/var/lib/postgresql/data/
+      - ../../../notification_database.ddl:/docker-entrypoint-initdb.d/init.sql
+    env_file:
+      - .env
+    environment:
+      POSTGRES_USER: ${NOTIFICATION_DB_USER}
+      POSTGRES_PASSWORD: ${NOTIFICATION_DB_PASSWORD}
+      POSTGRES_DB: ${NOTIFICATION_DB_NAME}
+    ports:
+      - "${NOTIFICATION_DB_PORT}:${NOTIFICATION_DB_PORT}"
+    command: -p ${NOTIFICATION_DB_PORT}
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "sh -c 'pg_isready -U ${NOTIFICATION_DB_USER} -d ${NOTIFICATION_DB_NAME} -p ${NOTIFICATION_DB_PORT}'",
+        ]
+      interval: 5s
+      timeout: 10s
+      retries: 50
+
+  notification-broker:
+    image: rabbitmq:3.12.1-management
+    container_name: notification-broker
+    restart: always
+    environment:
+      - RABBITMQ_DEFAULT_USER=${NOTIFICATION_BROKER_USERNAME}
+      - RABBITMQ_DEFAULT_PASS=${NOTIFICATION_BROKER_PASSWORD}
+    ports:
+      - "${NOTIFICATION_BROKER_PORT}:${NOTIFICATION_BROKER_PORT}"
+      - "${NOTIFICATION_BROKER_MANAGEMENT_PORT}:${NOTIFICATION_BROKER_MANAGEMENT_PORT}"
+    healthcheck:
+      test: [ "CMD", "rabbitmq-diagnostics", "-q", "ping" ]
+      interval: 5s
+      timeout: 10s
+      retries: 10
+
+
+  tests:
+    image: notification-image
+    working_dir: /app
+    container_name: notification-tests
+    env_file:
+      - .env
+    entrypoint: >
+      sh -c "cd /app/tests/functional/ && 
+             pip install -r requirements.txt && 
+             python3 utils/wait_for_db.py && 
+             python3 utils/wait_for_rabbit.py && 
+             pytest src || exit 1"
+    depends_on:
+      notification-service:
+        condition: service_healthy
+
+volumes:
+  notification_db:

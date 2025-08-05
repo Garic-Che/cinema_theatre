@@ -1,0 +1,35 @@
+@startuml one_time_payment
+title Схема разовой оплаты
+
+actor Клиент as Client
+participant "Billing-API" as BillingAPI
+participant "YooKassa" as YooKassa
+
+Client -> BillingAPI: Запрос на оплату
+activate BillingAPI
+
+BillingAPI -> YooKassa: Создание платежа (Idempotence-Key)
+activate YooKassa
+
+YooKassa --> BillingAPI: Получение id и confirmation_url
+deactivate YooKassa
+
+BillingAPI -> Client: Перенаправление на оплату
+
+Client -> YooKassa: Ввод карты и подтверждение
+activate YooKassa
+
+YooKassa -> BillingAPI: Webhook (payment.succeeded)
+
+loop Webhook недоступен
+    BillingAPI -> YooKassa: Проверка статуса платежа
+    YooKassa --> BillingAPI: Ответ с результатом
+    note right of BillingAPI
+        Касса 24 часа будет пытаться переотправить хук.
+        Наше приложение должно ответить 200, чтобы она перестала.
+    end note
+end
+
+deactivate BillingAPI
+
+@enduml

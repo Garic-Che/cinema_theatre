@@ -1,0 +1,31 @@
+@startuml refund
+title Схема возврата платежа
+
+actor Клиент as Client
+participant "Billing-API" as BillingAPI
+participant "YooKassa" as YooKassa
+
+Client -> BillingAPI: Запрос на возврат
+activate BillingAPI
+
+BillingAPI -> YooKassa: Создание возврата (Refund.create, Idempotence-Key)
+activate YooKassa
+
+YooKassa --> BillingAPI: Подтверждение создания возврата\n(refund.id, refund.status, и т.д.)
+YooKassa -> Client: Возврат средств
+deactivate YooKassa
+
+YooKassa -> BillingAPI: Webhook (refund.succeeded)
+
+loop Webhook недоступен
+    BillingAPI -> YooKassa: Проверка статуса возврата по refund.id
+    YooKassa --> BillingAPI: Ответ с результатом
+    note right of BillingAPI
+        Касса 24 часа будет пытаться переотправить хук.
+        Наше приложение должно ответить 200, чтобы она перестала.
+    end note
+end
+
+deactivate BillingAPI
+
+@enduml

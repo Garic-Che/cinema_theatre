@@ -1,0 +1,122 @@
+@startuml billing
+!theme plain
+skinparam sequenceMessageAlign center
+skinparam responseMessageBelowArrow true
+
+actor Client as "Клиент"
+participant "Billing-Scheduler\n(Cron)" as BillingScheduler
+participant "Billing-API\n(FastAPI)" as BillingAPI
+participant "Billing-DB\n(Postgres)" as Database
+participant "Платежный инструмент\n(Yookassa)" as PaymentProcessor
+participant "Auth-Service" as AuthService
+participant "Notification-Service" as NotificationService
+participant "Admin Panel\n(Django)" as AdminPanel
+actor "Администратор" as AdminUser
+
+== Процесс оплаты подписки ==
+Client -> BillingAPI: Запрос на (авто)оплату подписки
+note left of BillingAPI
+POST /api/v1/payment/
+body:
+{
+    "user_id": "123",
+    "subscription_id": UUID подписки,
+}
+POST /api/v1/payment/autopayment/
+body:
+{
+    "user_subscription_id": UUID подписки,
+}
+end note
+BillingAPI -> Database: Получение данных о стоимости роли в таблице <b>subscription</b>
+BillingAPI -> Database: Создание записи в таблице <b>transaction</b> со статусом "processing"\n(status_code = 1)
+group подробнее см. схемы "autopayment" и "one_time_payment"
+BillingAPI -> PaymentProcessor: Обработка платежа
+PaymentProcessor --> BillingAPI: Ответ
+end
+
+== Процесс отмены подписки ==
+Client -> BillingAPI: Запрос на отмену подписки
+note left of BillingAPI
+POST /api/v1/refund/
+body:
+{
+    "user_id": "123",
+    "transaction_id": "123",
+    "amount": 100.00,
+    "currency": "RUB",
+}
+end note
+BillingAPI -> Database: Получение данных о подписке, которая покупалась
+BillingAPI -> Database: Создание записи в таблице <b>transaction</b> на отмену подписки
+group подробнее см. схему "refund"
+BillingAPI -> PaymentProcessor: Обработка возврата платежа
+PaymentProcessor --> BillingAPI: Ответ
+end
+
+== Получение состояния платежа в платежном инструменте ==
+BillingScheduler -> BillingAPI: Запрос на получение состояния платежа
+note left of BillingAPI
+GET /api/v1/state/payment/{transaction_id}
+end note
+BillingAPI -> Database: Получение данных о платеже
+Database --> BillingAPI: Список данных о платеже
+BillingAPI -> PaymentProcessor: Получение состояния платежа
+PaymentProcessor --> BillingAPI: Состояние платежа
+
+== Административные операции ==
+AdminUser -> AdminPanel: Управление
+AdminPanel -> Database: Данные
+AdminPanel -> BillingAPI: Операции с API
+
+== Процесс проверки транзакций ==
+BillingScheduler -> Database: Получение записей в таблице <b>transaction</b>\nсо статусом "processing" (status_code = 1)
+Database --> BillingScheduler: Список записей
+BillingScheduler -> BillingAPI: Проверка транзакции\n(GET /api/v1/state/payment/{transaction_id})
+group Транзакция на оплату
+note right of BillingScheduler: Если оплата прошла, статус транзакции в таблице помечается как "completed" (status_code = 2). Не прошла - "failed" (status_code = 3).
+group Платеж прошел успешно. Даём подписку
+BillingScheduler -> Database: Обновление статуса записи в таблице <b>transaction</b>,\nа также внесение или изменение данных\nв таблицу <b>user_subscription</b> о платеже за подписку\n(<i>expires</i> прибавляется на <i>period</i> дней)
+BillingScheduler -> AuthService: Добавление роли {subscriber} пользователю
+end
+BillingScheduler -> NotificationService: Уведомление
+end
+group Транзакция на возврат
+note right of BillingScheduler: Если возврат прошел, статус транзакции в таблице помечается как "completed" (status_code = 2). Не прошел - "failed" (status_code = 3).
+group Возврат платежа прошел успешно, убираем подписку
+BillingScheduler -> Database: Обновление статуса записи в таблице <b>transaction</b>,\nа также изменение в таблице <b>user_subscription</b>\n(из <i>expires</i> вычитается <i>period</i> дней)
+BillingScheduler -> AuthService: Удаление роли {subscriber} пользователя (если <i>expires</i> меньше текущей даты)
+end
+BillingScheduler -> NotificationService: Уведомление
+end
+group Платеж просрочен (прошло больше n минут)
+BillingScheduler -> BillingAPI: Отмена платежа\n(POST /api/v1/refund/)
+BillingAPI -> Database: Обновление статуса записи в таблице <b>transaction</b>
+end
+
+== Процесс проверки истечения срока подписки ==
+BillingScheduler -> Database: Получение записей в таблице <b>user_subscription</b>\nс истекающим сроком подписки (n дней до истечения)
+Database --> BillingScheduler: Список записей
+note right of BillingScheduler: Для каждой полученной записи:
+group Выбран автоплатёж
+BillingScheduler -> BillingAPI: Запрос на оплату подписки\n(POST /api/v1/payment/autopayment/)
+end
+group Выбрана разовая оплата
+BillingScheduler -> NotificationService: Уведомление о необходимости оплаты
+end
+
+== Процесс удаления подписки по её истечению ==
+BillingScheduler -> Database: Получение записей в таблице <b>user_subscription</b> с истекшим сроком подписки
+Database --> BillingScheduler: Список записей
+note right of BillingScheduler: Для каждой полученной записи:
+BillingScheduler -> AuthService: Удаление роли {subscriber} у пользователя
+
+== Проверка существования роли ==
+BillingScheduler -> AuthService: Получение списка всех ролей
+AuthService --> BillingScheduler: Список ролей
+BillingScheduler -> Database: Получение ролей из таблицы <b>subscription</b>
+Database --> BillingScheduler: Список ролей
+note right of BillingScheduler: Если роли не существует в auth-service, то она удаляется из billing-db
+BillingScheduler -> Database: Удаление несуществующих ролей из таблицы <b>subscription</b>
+
+@enduml

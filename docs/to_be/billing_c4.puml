@@ -1,0 +1,94 @@
+@startuml billing_c4_context
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Context.puml
+
+LAYOUT_WITH_LEGEND()
+
+title Контекстная диаграмма - Система биллинга
+
+Person(client, "Клиент", "Пользователь, который оплачивает подписки")
+Person(admin, "Администратор", "Администратор системы, управляющий биллингом")
+
+System(billing_system, "Система биллинга", "Обеспечивает обработку платежей, управление подписками и автоматическое продление")
+
+System_Ext(payment_processor, "Платежный инструмент", "Yookassa")
+System_Ext(auth_service, "Auth Service", "Сервис аутентификации и управления ролями")
+System_Ext(notification_service, "Notification Service", "Сервис уведомлений")
+
+Rel(client, billing_system, "Оплачивает подписки, запрашивает возвраты")
+Rel(admin, billing_system, "Управляет настройками и мониторит операции")
+
+Rel(billing_system, payment_processor, "Обрабатывает платежи и возвраты")
+Rel(billing_system, auth_service, "Запрашивает информацию о ролях")
+Rel(billing_system, notification_service, "Отправляет уведомления")
+
+@enduml
+
+@startuml billing_c4_containers
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+LAYOUT_WITH_LEGEND()
+
+title Система биллинга
+
+Person(client, "Клиент", "Пользователь, который оплачивает подписки")
+Person(admin, "Администратор", "Администратор системы")
+
+System_Boundary(billing_system, "Система биллинга") {
+    Container(billing_api, "Billing API", "FastAPI", "REST API для операций с платежами и подписками")
+    Container(billing_scheduler, "Billing Scheduler", "Python", "Выполняет периодические задачи: проверка транзакций, продление/лишение подписок")
+    Container(admin_panel, "Admin Panel", "Django", "Веб-интерфейс для административного управления")
+    ContainerDb(billing_db, "Billing Database", "PostgreSQL", "Данные о транзакциях и подписках")
+    ContainerDb(redis_db, "Redis Database", "Redis", "Данные об отправленных уведомлениях, инициализированных автоплатежах")
+}
+
+System_Ext(payment_processor, "Платежный инструмент", "Yookassa")
+System_Ext(auth_service, "Auth Service", "Сервис аутентификации")
+System_Ext(notification_service, "Notification Service", "Сервис уведомлений")
+
+' Внешние связи
+Rel(client, billing_api, "Оплата, возврат, подписка на автоплатеж", "HTTPS")
+Rel(admin, admin_panel, "Управление", "HTTPS")
+
+' Внутренние связи системы биллинга
+Rel(billing_api, billing_db, "Чтение/запись данных", "SQL")
+Rel(billing_scheduler, billing_db, "Чтение/редактирование данных о транзакциях и подписках", "SQL")
+Rel(billing_scheduler, redis_db, "Запись/чтение данных защищающие от повторных действий", "SQL")
+Rel(billing_scheduler, billing_api, "Проверка статуса платежей", "HTTP")
+Rel(admin_panel, billing_db, "Чтение/редактирование данных", "SQL")
+Rel(admin_panel, billing_api, "Операции оплаты и возврата", "HTTP")
+
+' Внешние системные связи
+Rel(billing_api, payment_processor, "Обработка платежей", "HTTPS")
+Rel(billing_scheduler, auth_service, "Информация о ролях пользователей", "HTTP")
+Rel(billing_scheduler, notification_service, "Отправка уведомлений", "HTTP")
+
+@enduml
+
+@startuml billing_c4_components
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Component.puml
+
+LAYOUT_WITH_LEGEND()
+
+title Диаграмма компонентов - Billing API
+
+Container_Boundary(billing_api, "Billing API") {
+    Component(payment_controller, "Payment Controller", "FastAPI Router", "Обрабатывает запросы на оплату и возвраты")
+    Component(subscription_service, "Subscription Service", "Python", "Бизнес-логика управления подписками")
+    Component(transaction_service, "Transaction Service", "Python", "Бизнес-логика управления транзакциями")
+    Component(payment_processor_adapter, "Payment Processor Adapter", "Python", "Адаптер для работы с платежными системами")
+    Component(db_repository, "Database Repository", "Python", "Доступ к базе данных")
+}
+
+Container(billing_db, "Billing Database", "PostgreSQL", "Хранит данные о транзакциях и подписках")
+System_Ext(payment_processor, "Платежный инструмент", "Yookassa")
+
+Rel(payment_controller, subscription_service, "Использует")
+Rel(payment_controller, transaction_service, "Использует")
+Rel(subscription_service, db_repository, "Использует")
+Rel(transaction_service, db_repository, "Использует")
+Rel(subscription_service, payment_processor_adapter, "Использует")
+Rel(transaction_service, payment_processor_adapter, "Использует")
+Rel(payment_processor_adapter, payment_processor, "Вызывает API", "HTTPS")
+Rel(db_repository, billing_db, "Выполняет запросы", "SQL")
+
+@enduml 

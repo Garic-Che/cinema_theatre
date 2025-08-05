@@ -1,0 +1,40 @@
+services:
+  url-shortener:
+    build: ../../../url_shortener
+    container_name: url-shortener
+    env_file:
+      - .env
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://url-shortener:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    depends_on:
+      url-shortener-db:
+        condition: service_healthy
+
+  url-shortener-db:
+    image: postgres:latest
+    environment:
+      - POSTGRES_USER=${SHORTENER_DB_USER}
+      - POSTGRES_PASSWORD=${SHORTENER_DB_PASSWORD}
+      - POSTGRES_DB=${SHORTENER_DB_NAME}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${SHORTENER_DB_USER} -h ${SHORTENER_DB_HOST} -d ${SHORTENER_DB_NAME} -p ${SHORTENER_DB_PORT}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - ./url_shortener.ddl:/docker-entrypoint-initdb.d/init.sql
+
+  tests:
+    build: .
+    container_name: tests
+    volumes:
+      - .:/tests
+    depends_on:
+      url-shortener:
+        condition: service_healthy
+      url-shortener-db:
+        condition: service_healthy

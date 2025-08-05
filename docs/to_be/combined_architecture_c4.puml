@@ -1,0 +1,128 @@
+@startuml Combined Architecture C4
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+LAYOUT_WITH_LEGEND()
+
+title Архитектура системы
+
+Person(client, "Клиент")
+Person(admin, "Администратор")
+
+System_Boundary(c4, "UGC CRUD") {
+    Container(ugc_crud_api, "UGC CRUD API", "FastAPI", "API для лайков, комментариев, рецензий")
+    ContainerDb(ugc_crud_db, "UGC CRUD DB", "MongoDB", "База данных пользовательского контента")
+}
+
+System_Boundary(c5, "Система аутентификации") {
+    Container(auth_api, "Auth API", "FastAPI", "API аутентификации и авторизации")
+    ContainerDb(auth_db, "Auth DB", "PostgreSQL", "База данных пользователей")
+    ContainerDb(limiter_db, "Limiter DB", "Redis", "Ограничение запросов")
+}
+
+System_Boundary(c6, "UGC") {
+    Container(ugc_api, "UGC API", "Flask", "API для событий пользователя")
+    ContainerDb(ugc_oltp, "UGC OLTP", "Kafka", "Поток событий пользователя")
+    ContainerDb(ugc_olap, "UGC OLAP", "ClickHouse", "Аналитическая база данных")
+    Container(ugc_etl, "UGC ETL", "Python", "Обработка и валидация UGC данных")
+}
+
+System_Boundary(c1, "Система кинотеатра") {
+    Container(theatre_api, "Theatre API", "FastAPI", "API для работы с кино-данными")
+    Container(admin_panel, "Admin Panel", "Django", "Административная панель")
+    
+    Container(etl_service, "ETL Service", "Python", "Извлечение, трансформация и загрузка данных")
+    
+    ContainerDb(search_service, "Search Service", "ElasticSearch", "Поиск по фильмам, жанрам, людям")
+    ContainerDb(cache_db, "Cache DB", "Redis", "Кэширование данных")
+    ContainerDb(theatre_db, "Theatre DB", "PostgreSQL", "База данных кино-информации")
+}
+
+System_Boundary(c2, "Система уведомлений") {
+    Container(notification_api, "Notification API", "FastAPI", "API уведомлений")
+    Container(notification_broker, "Notification Broker", "RabbitMQ", "Очередь уведомлений")
+    Container(notification_worker, "Notification Worker", "Python", "Обработка уведомлений")
+    Container(notification_scheduler, "Notification Scheduler", "Python", "Сборщик персонифицированных уведомлений по расписанию")
+    Container(notification_admin, "Notification Admin", "Django", "Админ-панель уведомлений")
+    Container(notification_smtp, "Notification SMTP", "Python", "Отправка email уведомлений")
+    Container(notification_websocket, "Notification WebSocket", "Python", "Отправка уведомлений в реальном времени")
+    
+    ContainerDb(notification_db, "Notification DB", "PostgreSQL", "База данных уведомлений")
+}
+
+System_Boundary(c3, "Биллинговая система") {
+    Container(billing_api, "Billing API", "FastAPI", "API для обработки платежей и подписок")
+    Container(billing_scheduler, "Billing Scheduler", "Cron", "Планировщик биллинговых операций")
+    Container(billing_admin, "Billing Admin Panel", "Django", "Административная панель биллинга")
+    
+    ContainerDb(billing_db, "Billing DB", "PostgreSQL", "База данных биллинга")
+    ContainerDb(billing_redis_db, "Billing Redis DB", "Redis", "Billing Redis DB")
+}
+
+System_Ext(payment_processor, "Платежный инструмент", "Yookassa", "Внешний платежный сервис")
+
+' Связи клиента
+Rel(client, theatre_api, "Запрос кино-данных", "HTTPS")
+Rel(client, auth_api, "Аутентификация, авторизация, регистрация", "HTTPS")
+Rel(client, ugc_crud_api, "Лайки, комментарии, рецензии", "HTTPS")
+Rel(client, billing_api, "Оплата, возврат, подписка на автоплатеж", "HTTPS")
+Rel(client, ugc_api, "Передача пользовательских действий", "HTTPS")
+
+' Связи администратора
+Rel(admin, admin_panel, "Управление кино-данными", "HTTPS")
+Rel(admin, notification_admin, "Управление уведомлениями", "HTTPS")
+Rel(admin, billing_admin, "Управление биллингом", "HTTPS")
+
+' Связи Theatre API
+Rel(theatre_api, search_service, "Получение данных", "HTTP")
+Rel(theatre_api, cache_db, "Кэширование", "Redis")
+Rel(admin_panel, theatre_db, "Редактирование кино-данных", "SQL")
+
+' Связи Auth API
+Rel(auth_api, auth_db, "Хранение пользователей", "SQL")
+Rel(auth_api, limiter_db, "Ограничение запросов", "Redis")
+
+' Связи ETL
+Rel(theatre_db, etl_service, "Извлечение данных", "SQL")
+Rel(etl_service, search_service, "Загрузка данных", "HTTP")
+
+' Связи UGC
+Rel(ugc_api, ugc_oltp, "Запись событий", "Kafka")
+Rel(ugc_crud_api, ugc_crud_db, "CRUD операции", "MongoDB")
+Rel(ugc_oltp, ugc_etl, "Обработка", "Kafka")
+Rel(ugc_etl, ugc_olap, "Загрузка аналитических данных", "ClickHouse")
+
+' Связи уведомлений
+Rel(ugc_crud_api, notification_api, "Уведомления пользователя", "HTTP")
+Rel(notification_api, notification_broker, "В очередь на обработку", "AMQP")
+Rel(notification_api, notification_db, "Запись уведомлений", "SQL")
+Rel(notification_broker, notification_worker, "Получение задач", "AMQP")
+Rel(notification_scheduler, notification_api, "Автоматические уведомления", "HTTP")
+Rel(notification_scheduler, notification_db, "Чтение расписаний", "SQL")
+Rel(notification_admin, notification_db, "CRUD шаблонов, расписаний, уведомлений для рассылки и д.р.", "SQL")
+Rel(notification_broker, notification_smtp, "Отправка email", "AMQP")
+Rel(notification_broker, notification_websocket, "Отправка в реальном времени", "AMQP")
+Rel(notification_worker, notification_db, "Получение шаблона, затем запись заполненного шаблона", "SQL")
+Rel(notification_worker, notification_broker, "В очередь на отправку", "AMQP")
+
+' Связи биллинга
+Rel(billing_api, billing_db, "Чтение / запись данных", "SQL")
+Rel(billing_scheduler, billing_db, "Чтение / редактирование данных о транзакциях и подписках", "SQL")
+Rel(billing_scheduler, billing_api, "Проверка состояния платежей", "HTTP")
+Rel(billing_admin, billing_db, "Управление данными", "SQL")
+Rel(billing_admin, billing_api, "Операции оплаты и возврата", "HTTP")
+Rel(billing_scheduler, billing_redis_db, "Запись / чтение данных защищающие от повторных действий", "Redis")
+
+' Связи с внешними системами
+Rel(billing_api, payment_processor, "Обработка платежей", "HTTPS")
+Rel(billing_scheduler, payment_processor, "Проверка состояния платежей", "HTTPS")
+
+' Межсистемные связи
+Rel(billing_scheduler, auth_api, "Управление ролями пользователей", "HTTP")
+Rel(billing_scheduler, notification_api, "Уведомления о платежах", "HTTP")
+Rel(notification_scheduler, theatre_api, "Получение данных для дайджеста", "HTTP")
+Rel(notification_scheduler, ugc_crud_api, "Получение данных закладок", "HTTP")
+Rel(notification_scheduler, auth_api, "Получение user_id из группы", "HTTP")
+Rel(notification_smtp, auth_api, "Получение email для рассылки", "HTTP")
+Rel(notification_websocket, auth_api, "Получение информации для рассылки", "HTTP")
+
+@enduml 

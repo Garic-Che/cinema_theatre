@@ -1,0 +1,69 @@
+@startuml Текущая архитектура
+skinparam componentStyle uml2
+actor Клиент as Client
+component "FrontEnd" as FrontEnd
+rectangle "BackEnd" {
+    rectangle "Nginx" as ApiV1 {
+        component "<<Admin-Panel>>\n""Django""" as AdminPanel
+        component "<<Theatre-API>>\n""Fastapi""" as TheatreApi
+        component "<<Auth-API>>\n""Fastapi""" as AuthApi
+        component "<<UGC-CRUD-API>>\n""Fastapi""" as UGC_CRUD_API
+        component "<<UGC-API>>\n""Flask""\nЭндпоинт: events" as UGCApi
+    }
+    component "<<ETL-service>>" as ETLService
+    database "<<Search-Service>>\n""ElasticSearch""" as SearchService
+    database "<<Cache-DB>>\n""Redis""" as CacheDB
+    database "<<Theatre-DB>>\n""Postgres""" as TheatreDB
+    database "<<Auth-DB>>\n""Postgres""" as AuthDB
+    database "<<Limiter-DB>>\n""Redis""" as LimiterDB
+    database "<<OLTP-UGC-DB>>\n""Kafka""" as OLTP_UGC_DB
+    database "<<OLAP-UGC-DB>>\n""ClickHouse""" as OLAP_UGC_DB
+    database "<<UGC-CRUD-DB>>\n""MongoDB""" as UGC_CRUD_DB
+    component "<<UGC-ETL-service>>\nПарсинг сообщения,\nвалидация и запись" as UGC_ETL
+    rectangle "Notification" as Notification {
+        component "<<Notification-API>>\n""Fastapi""\n\napi/v1/notification\n\nbody: {to_id: str,\nsend_by: str,\ncontent_key: str,\ncontent_data: str}" as NotificationAPI
+        component "<<Notification-Broker>>\n""RabbitMQ""" as NotificationBroker
+        component "<<Notification-Worker>>\n""Celery""\n\nЗаполнение шаблона" as NotificationWorker
+        component "<<Notification-Scheduler>>\n""Cron""\n\nСборка персонифицированных\nуведомлений по расписанию" as NotificationScheduler
+        component "<<Notification-Admin-Panel>>\n""Fastapi / Django""" as NotificationAdminPanel
+        component "<<Notification-SMTP>>\n\nЗаполненный шаблон\nполучить через API:\nGET api/v1/notification/template/{notification_id}\n\nПосле отправки уведомить API:\nPOST api/v1/notification/sent\nbody: {notification_id: str}" as NotificationSMTP
+        component "<<Notification-Websocket>>\n\nЗаполненный шаблон\nполучить через API:\nGET api/v1/notification/template/{notification_id}\n\nПосле отправки уведомить API:\nPOST api/v1/notification/sent\nbody: {notification_id: str}" as NotificationWebsocket
+        database "<<Notification-DB>>\n""Postgres""" as NotificationDB
+    }
+}
+
+Client -down-> AdminPanel: Вход в админку
+Client -down-> TheatreApi: Запрос\nкино-данных
+Client -down-> AuthApi: Аутентификация
+Client -down-> UGC_CRUD_API: Лайки,\nкомментарии,\nрецензии,\nзакладки
+Client -> FrontEnd: Работа с сайтом
+FrontEnd -down-> UGCApi: Передача\nпользовательских\nдействий
+TheatreApi -down-> SearchService: Получение\nданных
+TheatreApi -down-> CacheDB
+AdminPanel -down-> TheatreDB: Редактирование\nкино-данных
+AuthApi -down-> AuthDB
+AuthApi -down-> LimiterDB
+TheatreDB -down-> ETLService
+ETLService -up-> SearchService
+UGCApi -down-> OLTP_UGC_DB: Запись в топик\nevents
+UGC_CRUD_API -down-> UGC_CRUD_DB
+OLTP_UGC_DB -down-> UGC_ETL
+UGC_ETL -right-> OLAP_UGC_DB
+UGC_CRUD_API --> NotificationAPI: Уведомление\nпользователя\n{to: user_id}
+NotificationAPI -down-> NotificationBroker: в очередь на воркер:\n{id уведомления,\nid получателя,\nспособ отправки}
+NotificationAPI -> NotificationDB: Запись уведомлений\nи контента
+NotificationBroker -> NotificationWorker: Получение информации
+NotificationScheduler -down-> NotificationAPI: Отправка\nавтоматических\nуведомлений\n{to: user_id}
+NotificationScheduler -down-> NotificationDB: Периодическое чтение\nиз таблицы\nSchedule-Notification
+NotificationAdminPanel -down-> NotificationDB: CRUD шаблонов, расписаний,\nуведомлений для рассылки\n(Schedule-Notification:\nonce=True\nnext_send=now())\nи др. информации\nв таблицах
+NotificationBroker -down-> NotificationSMTP
+NotificationBroker -down-> NotificationWebsocket
+NotificationScheduler --> TheatreApi: Получение данных\nдля дайджеста
+NotificationScheduler -up-> UGC_CRUD_API: Получение\nданных\n(закладки)
+NotificationScheduler -up-> AuthApi: Получение\nuser_id\nиз группы
+NotificationSMTP -up-> AuthApi: Получение email\nдля рассылки
+NotificationWebsocket -up-> AuthApi: Получение инфы\nдля рассылки
+NotificationWorker -up-> NotificationDB: 1) Получение\nшаблона
+NotificationWorker -up-> NotificationDB: 2) Запись\nзаполненного\nшаблона
+NotificationWorker -> NotificationBroker: 3) В очередь по способу отправки:\n{id уведомления,\nid получателя,\nспособ отправки}
+@enduml

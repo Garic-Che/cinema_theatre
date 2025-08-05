@@ -1,0 +1,922 @@
+services:
+  nginx:
+    image: nginx:alpine
+    container_name: nginx
+    env_file:
+      - .env
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./configs:/etc/nginx/conf.d:ro
+      - static_volume:/data/static
+      - flasgger_static_volume:/data/flasgger_static
+    depends_on:
+      - movies-admin
+    ports:
+      - "${NGINX_PORT}:${NGINX_PORT}"
+    restart: always
+
+  movies-admin:
+    build: movies_admin
+    container_name: movies-admin
+    restart: always
+    volumes:
+      - ./movies_admin:/code
+      - static_volume:${DJANGO_STATIC_PATH}
+    env_file:
+      - .env
+    depends_on:
+      theatre-db:
+        condition: service_healthy
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        tag: "{{.Name}}"  # Добавляем имя контейнера в теги
+
+  theatre_service:
+    build: theatre_service
+    container_name: theatre_service
+    env_file:
+      - .env
+    depends_on:
+      cache-db:
+        condition: service_healthy
+      search-service:
+        condition: service_healthy
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        tag: "{{.Name}}"  # Добавляем имя контейнера в теги
+
+  theatre-db:
+    build: 
+      context: .
+      dockerfile: Dockerfile.postgres   # c pg_partman
+    container_name: theatre-db
+    restart: always
+    volumes:
+      - content_db:/var/lib/postgresql/data/
+      - ./movies_database.ddl:/docker-entrypoint-initdb.d/init.sql
+    env_file:
+      - .env
+    environment:
+      POSTGRES_USER: ${PG_USER}
+      POSTGRES_PASSWORD: ${PG_PASSWORD}
+      POSTGRES_DB: ${PG_DB}
+    ports:
+      - "${SQL_PORT}:${SQL_PORT}"
+    command: -p ${SQL_PORT}
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "sh -c 'pg_isready -U ${PG_USER} -d ${PG_DB} -p ${SQL_PORT}'",
+        ]
+      interval: 5s
+      timeout: 10s
+      retries: 50
+
+
+  cache-db:
+    image: redis:7.4.2
+    container_name: cache-db
+    ports:
+      - "${REDIS_PORT}:${REDIS_PORT}"
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  etl_service:
+    build: etl_service
+    container_name: etl_service
+    env_file:
+      - .env
+    depends_on:
+      theatre-db:
+        condition: service_healthy
+      search-service:
+        condition: service_healthy
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        tag: "{{.Name}}"  # Добавляем имя контейнера в теги
+
+  search-service:
+    image: elasticsearch:8.6.2
+    container_name: search-service
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+    ports:
+      - "${ES_PORT}:${ES_PORT}"
+    expose:
+      - "${ES_PORT}"
+    healthcheck:
+      test: curl -s ${ES_HOST}:${ES_PORT} >/dev/null || exit 1
+      interval: 5s
+      timeout: 10s
+      retries: 50
+
+  auth_service:
+    build: auth_service
+    container_name: auth_service
+    env_file:
+      - .env
+    depends_on:
+      token-db:
+        condition: service_healthy
+      auth-db:
+        condition: service_healthy
+      limiter-db:
+        condition: service_healthy
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        tag: "{{.Name}}"  # Добавляем имя контейнера в теги
+
+  auth-db:
+    # image: postgres:16
+    build: 
+      context: .
+      dockerfile: Dockerfile.postgres   # c pg_partman
+    container_name: auth-db
+    restart: always
+    environment:
+      POSTGRES_USER: ${AUTH_DB_USER}
+      POSTGRES_PASSWORD: ${AUTH_DB_PASSWORD}
+      POSTGRES_DB: ${AUTH_DB_DATABASE}
+    volumes:
+      - auth_db:/var/lib/postgresql/data/
+      - ./auth_database.ddl:/docker-entrypoint-initdb.d/init.sql
+    env_file:
+      - .env
+    ports:
+      - "${AUTH_DB_PORT}:${AUTH_DB_PORT}"
+    command: -p ${AUTH_DB_PORT}
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "sh -c 'pg_isready -U ${AUTH_DB_USER} -d ${AUTH_DB_DATABASE} -p ${AUTH_DB_PORT}'",
+        ]
+      interval: 10s
+      timeout: 30s
+      retries: 50
+
+  token-db:
+    image: redis:7.4.2
+    container_name: token-db
+    ports:
+      - "${TOKEN_REDIS_PORT}:${REDIS_PORT}"
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.48
+    container_name: jaeger
+    ports:
+      - "16686:16686"  # UI
+      - "6831:6831/udp"  # Jaeger agent (Thrift compact)
+      - "6832:6832/udp"  # Jaeger agent (Thrift binary)
+      - "5778:5778"  # Config server
+      - "4317:4317"  # OTLP gRPC
+      - "4318:4318"  # OTLP HTTP
+      - "14250:14250"  # Jaeger gRPC
+      - "14268:14268"  # Jaeger HTTP
+      - "9411:9411"  # Zipkin
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    restart: always
+
+  limiter-db:
+    image: redis:7.4.2
+    container_name: limiter-db
+    ports:
+      - "${LIMITER_REDIS_PORT}:${REDIS_PORT}"
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  kafka-0:
+    image: bitnami/kafka:3.4
+    container_name: kafka-0
+    restart: always
+    healthcheck:
+      test: ["CMD", "/opt/bitnami/kafka/bin/kafka-topics.sh", "--list", "--bootstrap-server", "kafka-0:9094", "||",  "exit 1"]
+      start_period: 5s
+      interval: 5s
+      timeout: 10s
+      retries: 50
+    ports:
+      - "9094:9094"
+    environment:
+      - KAFKA_ENABLE_KRAFT=yes
+      - KAFKA_CFG_PROCESS_ROLES=broker,controller
+      - KAFKA_CFG_CONTROLLER_LISTENER_NAMES=CONTROLLER
+      - ALLOW_PLAINTEXT_LISTENER=yes
+      - KAFKA_CFG_NODE_ID=0
+      - KAFKA_CFG_CONTROLLER_QUORUM_VOTERS=0@kafka-0:9093,1@kafka-1:9093,2@kafka-2:9093
+      - KAFKA_KRAFT_CLUSTER_ID=abcdefghijklmnopqrstuv
+      - KAFKA_CFG_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:9094
+      - KAFKA_CFG_ADVERTISED_LISTENERS=PLAINTEXT://kafka-0:9092,EXTERNAL://127.0.0.1:9094
+      - KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT,PLAINTEXT:PLAINTEXT
+    volumes:
+      - kafka_0_data:/bitnami/kafka
+   
+  kafka-1:
+    image: bitnami/kafka:3.4
+    container_name: kafka-1
+    restart: always
+    healthcheck:
+      test: ["CMD", "/opt/bitnami/kafka/bin/kafka-topics.sh", "--list", "--bootstrap-server", "kafka-1:9095", "||",  "exit 1"]
+      start_period: 5s
+      interval: 5s
+      timeout: 10s
+      retries: 50
+    ports:
+      - "9095:9095"
+    environment:
+      - KAFKA_ENABLE_KRAFT=yes
+      - ALLOW_PLAINTEXT_LISTENER=yes
+      - KAFKA_CFG_NODE_ID=1
+      - KAFKA_CFG_PROCESS_ROLES=broker,controller
+      - KAFKA_CFG_CONTROLLER_LISTENER_NAMES=CONTROLLER
+      - KAFKA_CFG_CONTROLLER_QUORUM_VOTERS=0@kafka-0:9093,1@kafka-1:9093,2@kafka-2:9093
+      - KAFKA_KRAFT_CLUSTER_ID=abcdefghijklmnopqrstuv
+      - KAFKA_CFG_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:9095
+      - KAFKA_CFG_ADVERTISED_LISTENERS=PLAINTEXT://kafka-1:9092,EXTERNAL://127.0.0.1:9095
+      - KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT,PLAINTEXT:PLAINTEXT
+    volumes:
+      - kafka_1_data:/bitnami/kafka
+   
+  kafka-2:
+    image: bitnami/kafka:3.4
+    container_name: kafka-2
+    restart: always
+    healthcheck:
+      test: ["CMD", "/opt/bitnami/kafka/bin/kafka-topics.sh", "--list", "--bootstrap-server", "kafka-2:9096", "||",  "exit 1"]
+      start_period: 5s
+      interval: 5s
+      timeout: 10s
+      retries: 50
+    ports:
+      - "9096:9096"
+    environment:
+      - KAFKA_ENABLE_KRAFT=yes
+      - ALLOW_PLAINTEXT_LISTENER=yes
+      - KAFKA_CFG_NODE_ID=2
+      - KAFKA_CFG_PROCESS_ROLES=broker,controller
+      - KAFKA_CFG_CONTROLLER_LISTENER_NAMES=CONTROLLER
+      - KAFKA_CFG_CONTROLLER_QUORUM_VOTERS=0@kafka-0:9093,1@kafka-1:9093,2@kafka-2:9093
+      - KAFKA_KRAFT_CLUSTER_ID=abcdefghijklmnopqrstuv
+      - KAFKA_CFG_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:9096
+      - KAFKA_CFG_ADVERTISED_LISTENERS=PLAINTEXT://kafka-2:9092,EXTERNAL://127.0.0.1:9096
+      - KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT,PLAINTEXT:PLAINTEXT
+    volumes:
+      - kafka_2_data:/bitnami/kafka  
+ 
+  topic-setup:
+    image: apache/kafka
+    container_name: topic-setup
+    entrypoint:
+      - sh
+      - -c
+      - | 
+        opt/kafka/bin/kafka-topics.sh \
+          --create \
+          --topic ${KAFKA_TOPIC_NAME} \
+          --if-not-exists \
+          --partitions ${KAFKA_PARTITION_NUMBER} \
+          --replication-factor ${KAFKA_REPLICATION_FACTOR} \
+          --bootstrap-server ${KAFKA_BOOTSTRAP_SERVER} \
+          --config min.insync.replicas=${KAFKA_INSYNC_REPLICAS_NUMBER} \
+          --config retention.ms=${KAFKA_MESSAGE_TTL_IN_MS}
+    env_file:
+      - .env
+    depends_on:
+      kafka-0:
+        condition: service_healthy
+      kafka-1:
+        condition: service_healthy
+      kafka-2:
+        condition: service_healthy
+
+  zookeeper:
+    image: zookeeper:3.8
+    container_name: zookeeper
+    hostname: zookeeper
+    healthcheck:
+      test: ["CMD", "echo", "srvr", "|", "nc", "localhost", "2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:v0.7.0
+    ports:
+      - "8080:8080"
+    environment:
+      - KAFKA_CLUSTERS_0_BOOTSTRAP_SERVERS=${kafka-0:9092,kafka-1:9092,kafka-2:9092}
+      - KAFKA_CLUSTERS_0_NAME=kraft
+
+  clickhouse-node1:
+    image: clickhouse/clickhouse-server:23
+    container_name: clickhouse-node1
+    hostname: clickhouse-node1
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - ./clickhouse/data/node1/config.xml:/etc/clickhouse-server/config.d/config.xml:ro
+      - ./clickhouse/data/node1/users.xml:/etc/clickhouse-server/users.d/users.xml:ro
+      - ./clickhouse/init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+
+  clickhouse-node2:
+    image: clickhouse/clickhouse-server:23
+    container_name: clickhouse-node2
+    hostname: clickhouse-node2
+    ports:
+      - "8124:8123"
+      - "9001:9000"
+    volumes:
+      - ./clickhouse/data/node2/config.xml:/etc/clickhouse-server/config.d/config.xml:ro
+      - ./clickhouse/data/node2/users.xml:/etc/clickhouse-server/users.d/users.xml:ro
+      - ./clickhouse/init/01_init_replicas.sql:/docker-entrypoint-initdb.d/01_init_replicas.sql
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+
+  clickhouse-node3:
+    image: clickhouse/clickhouse-server:23
+    container_name: clickhouse-node3
+    hostname: clickhouse-node3
+    ports:
+      - "8125:8123"
+      - "9002:9000"
+    volumes:
+      - ./clickhouse/data/node3/config.xml:/etc/clickhouse-server/config.d/config.xml:ro
+      - ./clickhouse/data/node3/users.xml:/etc/clickhouse-server/users.d/users.xml:ro
+      - ./clickhouse/init/01_init_replicas.sql:/docker-entrypoint-initdb.d/01_init_replicas.sql
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+
+  clickhouse-node4:
+    image: clickhouse/clickhouse-server:23
+    container_name: clickhouse-node4
+    hostname: clickhouse-node4
+    ports:
+      - "8126:8123"
+      - "9003:9000"
+    volumes:
+      - ./clickhouse/data/node4/config.xml:/etc/clickhouse-server/config.d/config.xml:ro
+      - ./clickhouse/data/node4/users.xml:/etc/clickhouse-server/users.d/users.xml:ro
+      - ./clickhouse/init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+
+  clickhouse-node5:
+    image: clickhouse/clickhouse-server:23
+    container_name: clickhouse-node5
+    hostname: clickhouse-node5
+    ports:
+      - "8127:8123"
+      - "9004:9000"
+    volumes:
+      - ./clickhouse/data/node5/config.xml:/etc/clickhouse-server/config.d/config.xml:ro
+      - ./clickhouse/data/node5/users.xml:/etc/clickhouse-server/users.d/users.xml:ro
+      - ./clickhouse/init/01_init_replicas.sql:/docker-entrypoint-initdb.d/01_init_replicas.sql
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+
+  clickhouse-node6:
+    image: clickhouse/clickhouse-server:23
+    container_name: clickhouse-node6
+    hostname: clickhouse-node6
+    ports:
+      - "8128:8123"
+      - "9005:9000"
+    volumes:
+      - ./clickhouse/data/node6/config.xml:/etc/clickhouse-server/config.d/config.xml:ro
+      - ./clickhouse/data/node6/users.xml:/etc/clickhouse-server/users.d/users.xml:ro
+      - ./clickhouse/init/01_init_replicas.sql:/docker-entrypoint-initdb.d/01_init_replicas.sql
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+
+  etl-kafka-clickhouse:
+    build: kafka_clickhouse_etl
+    env_file:
+      - .env
+    depends_on:
+      kafka-0:
+        condition: service_healthy
+      kafka-1:
+        condition: service_healthy
+      kafka-2:
+        condition: service_healthy
+      clickhouse-node1:
+        condition: service_healthy
+      clickhouse-node2:
+        condition: service_healthy
+      clickhouse-node3:
+        condition: service_healthy
+      clickhouse-node4:
+        condition: service_healthy
+      clickhouse-node5:
+        condition: service_healthy
+      clickhouse-node6:
+        condition: service_healthy
+
+
+  ugc_service:
+    build: ugc_service
+    container_name: ugc_service
+    env_file:
+      - .env
+    volumes:
+      - flasgger_static_volume:/app/flasgger_static
+    depends_on:
+      ugc-limiter-db:
+        condition: service_healthy
+      kafka-0:
+        condition: service_healthy
+      kafka-1:
+        condition: service_healthy
+      kafka-2:
+        condition: service_healthy
+
+  ugc-limiter-db:
+    image: redis:7.4.2
+    container_name: ugc-limiter-db
+    ports:
+      - "${UGC_LIMITER_REDIS_PORT}:${REDIS_PORT}"
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  sentry-api:
+    image: sentry:latest
+    env_file:
+      - .env
+    depends_on:
+      db-sentry:
+        condition: service_healthy
+      redis-for-sentry:
+        condition: service_started
+    ports:
+      - "9000:9000"
+    volumes:
+      - sentry-data:/var/lib/sentry/files
+    command: >
+      bash -c "
+      if [ ! -f /var/lib/sentry/files/.migrations_complete ]; then
+        sentry upgrade --noinput &&
+        sentry createuser --email ${SENTRY_SUPERUSER_EMAIL} --password ${SENTRY_SUPERUSER_PASSWORD} --superuser --no-input 2>/dev/null || true &&
+        touch /var/lib/sentry/files/.migrations_complete
+      fi &&
+      sentry run web"
+
+  sentry-worker:
+    image: sentry:latest
+    env_file:
+      - .env
+    depends_on:
+      db-sentry:
+        condition: service_healthy
+      redis-for-sentry:
+        condition: service_started
+    command: sentry run worker
+
+  sentry-cron:
+    image: sentry:latest
+    env_file:
+      - .env
+    depends_on:
+      db-sentry:
+        condition: service_healthy
+      redis-for-sentry:
+        condition: service_started
+    command: sentry run cron
+
+  db-sentry:
+    image: postgres:latest
+    environment:
+      - POSTGRES_USER=${SENTRY_DB_USER}
+      - POSTGRES_PASSWORD=${SENTRY_DB_PASSWORD}
+      - POSTGRES_DB=${SENTRY_DB_NAME}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${SENTRY_DB_USER} -d ${SENTRY_DB_NAME} -p ${SENTRY_DB_PORT}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - db-sentry-data:/var/lib/postgresql/data
+
+  redis-for-sentry:
+    image: redis:4.0-alpine
+    restart: always
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-for-sentry-data:/data
+    ports:
+      - "${SENTRY_REDIS_PORT}:${REDIS_PORT}"
+
+  ugc-crud-db:
+    image: mongo
+    container_name: ugc_crud_db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.runCommand('ping').ok"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    ports:
+      - "27017:27017"
+    restart: unless-stopped
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=${MONGO_ROOT_USERNAME}
+      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_ROOT_PASSWORD}
+
+  ugc_crud_service:
+    build: ugc_crud_service
+    container_name: ugc_crud_service
+    env_file:
+      - .env
+    depends_on:
+      ugc-crud-db:
+        condition: service_healthy
+    volumes:
+      - ./ugc_crud_service/src:/app/src
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        tag: "{{.Name}}"  # Добавляем имя контейнера в теги
+
+  elasticsearch-logs:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.12.0
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms1g -Xmx1g
+      - action.auto_create_index=.kibana*,*
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -sS http://localhost:9200/_cluster/health | grep -qE '\"status\":\"(green|yellow)\"'" ]
+      interval: 10s
+      timeout: 30s
+      retries: 15
+    ports:
+      - "9201:9200"
+    networks:
+      - elk
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.12.0
+    container_name: kibana
+    depends_on:
+      elasticsearch-logs:
+        condition: service_healthy
+    ports:
+      - "5601:5601"
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch-logs:9200
+    networks:
+      - elk
+
+  filebeat:
+    image: docker.elastic.co/beats/filebeat:8.12.0
+    container_name: filebeat
+    user: root
+    volumes:
+      - ./elk/filebeat.yml:/usr/share/filebeat/filebeat.yml
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      elasticsearch-logs:
+        condition: service_healthy
+    networks:
+      - elk
+
+  notification-service:
+    build: notification_service
+    container_name: notification-service
+    env_file:
+      - .env
+    depends_on:
+      notification-db:
+        condition: service_healthy
+      notification-broker:
+        condition: service_healthy
+
+
+  notification-db:
+    build: 
+      context: .
+      dockerfile: Dockerfile.postgres   # c pg_partman
+    container_name: notification-db
+    restart: always
+    volumes:
+      - notification_db:/var/lib/postgresql/data/
+      - ./notification_database.ddl:/docker-entrypoint-initdb.d/init.sql
+    env_file:
+      - .env
+    environment:
+      POSTGRES_USER: ${NOTIFICATION_DB_USER}
+      POSTGRES_PASSWORD: ${NOTIFICATION_DB_PASSWORD}
+      POSTGRES_DB: ${NOTIFICATION_DB_NAME}
+    ports:
+      - "${NOTIFICATION_DB_PORT}:${NOTIFICATION_DB_PORT}"
+    command: -p ${NOTIFICATION_DB_PORT}
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "sh -c 'pg_isready -U ${NOTIFICATION_DB_USER} -d ${NOTIFICATION_DB_NAME} -p ${NOTIFICATION_DB_PORT}'",
+        ]
+      interval: 5s
+      timeout: 10s
+      retries: 50
+
+  notification-broker:
+    image: rabbitmq:3.12.1-management
+    container_name: notification-broker
+    restart: always
+    environment:
+      - RABBITMQ_DEFAULT_USER=${NOTIFICATION_BROKER_USERNAME}
+      - RABBITMQ_DEFAULT_PASS=${NOTIFICATION_BROKER_PASSWORD}
+    ports:
+      - "${NOTIFICATION_BROKER_PORT}:${NOTIFICATION_BROKER_PORT}"
+      - "${NOTIFICATION_BROKER_MANAGEMENT_PORT}:${NOTIFICATION_BROKER_MANAGEMENT_PORT}"
+    healthcheck:
+      test: [ "CMD", "rabbitmq-diagnostics", "-q", "ping" ]
+      interval: 5s
+      timeout: 10s
+      retries: 10
+
+  # smtp_test:
+  #   build: smtp_test
+  #   container_name: smtp-test
+  #   ports:
+  #     - "8001:8025"
+  #   volumes:
+  #     - "./smtp_test:/app"
+  #   environment:
+  #     - PYTHONUNBUFFERED=1
+
+  mailhog:
+    image: mailhog/mailhog
+    container_name: mailhog
+    # logging:
+    #   driver: 'none'  # disable saving logs
+    ports:
+      - 1025:1025 # smtp server
+      - 8025:8025 # web ui
+
+  notification-worker:
+    build: notification_worker
+    container_name: notification-worker
+    env_file:
+      - .env
+    depends_on:
+      notification-db:
+        condition: service_healthy
+      notification-broker:
+        condition: service_healthy
+  
+  notification-smtp-service:
+    build: notification_smtp_service
+    container_name: notification-smtp-service
+    env_file:
+      - .env
+    depends_on:
+      mailhog:
+        condition: service_started
+      auth_service:
+        condition: service_started
+      notification-service:
+        condition: service_started
+
+  web-socket-service:
+    build: notification_websocket_service
+    container_name: web-socket-service
+    env_file:
+      - .env
+    depends_on:
+      notification-service:
+        condition: service_started
+
+  notification-scheduler:
+    build: ./notification_scheduler
+    container_name: notification-scheduler
+    env_file:
+      - .env
+    depends_on:
+      notification-db:
+        condition: service_healthy
+      notification-broker:
+        condition: service_healthy
+      notification-service:
+        condition: service_started
+      auth_service:
+        condition: service_started
+      ugc_crud_service:
+        condition: service_started
+      theatre_service:
+        condition: service_started
+  
+  notification-admin:
+    build: ./notifications_admin/app
+    container_name: notification-admin
+    env_file: .env
+    volumes:
+      - ./notifications_admin/app:/app
+      - static_volume:/app/staticfiles
+    ports:
+      - "${NOTIFICATION_DJANGO_ADMIN_PORT}:${NOTIFICATION_DJANGO_ADMIN_PORT}"
+    depends_on:
+      - notification-db
+
+  url-shortener:
+    build: ./url_shortener
+    container_name: url-shortener
+    env_file:
+      - .env
+    volumes:
+      - ./url_shortener/src:/app/src
+    depends_on:
+      url-shortener-db:
+        condition: service_healthy
+
+  url-shortener-db:
+    image: postgres:latest
+    environment:
+      - POSTGRES_USER=${SHORTENER_DB_USER}
+      - POSTGRES_PASSWORD=${SHORTENER_DB_PASSWORD}
+      - POSTGRES_DB=${SHORTENER_DB_NAME}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${SHORTENER_DB_USER} -h ${SHORTENER_DB_HOST} -d ${SHORTENER_DB_NAME} -p ${SHORTENER_DB_PORT}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - url-shortener-db:/var/lib/postgresql/data
+      - ./url_shortener.ddl:/docker-entrypoint-initdb.d/init.sql
+
+  billing-service:
+    build: billing_service
+    container_name: billing-service
+    env_file:
+      - .env
+    depends_on:
+      billing-db:
+        condition: service_healthy
+    volumes:
+      - ./billing_service/src:/app/src
+      - ./billing_service/alembic:/app/alembic
+
+
+  billing-db:
+    build: 
+      context: .
+      dockerfile: Dockerfile.postgres   # c pg_partman
+    container_name: billing-db
+    restart: always
+    volumes:
+      - billing_db:/var/lib/postgresql/data/
+      - ./billing_database.ddl:/docker-entrypoint-initdb.d/init.sql
+    env_file:
+      - .env
+    environment:
+      POSTGRES_USER: ${BILLING_DB_USER}
+      POSTGRES_PASSWORD: ${BILLING_DB_PASSWORD}
+      POSTGRES_DB: ${BILLING_DB_NAME}
+    ports:
+      - "${BILLING_DB_PORT}:${BILLING_DB_PORT}"
+    command: -p ${BILLING_DB_PORT}
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "sh -c 'pg_isready -U ${BILLING_DB_USER} -d ${BILLING_DB_NAME} -p ${BILLING_DB_PORT}'",
+        ]
+      interval: 5s
+      timeout: 10s
+      retries: 50
+
+  billing-notification-redis:
+    image: redis:7.4.2
+    container_name: billing-notification-redis
+    ports:
+      - "${BILLING_NOTIFICATION_REDIS_PORT}:${REDIS_PORT}"
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  billing-scheduler:
+    build: billing_scheduler
+    container_name: billing-scheduler
+    env_file:
+      - .env
+    restart: always
+    depends_on:
+      billing-db:
+        condition: service_healthy
+      billing-service:
+        condition: service_started
+      notification-service:
+        condition: service_started
+      auth_service:
+        condition: service_started
+      billing-notification-redis:
+        condition: service_healthy
+      
+  billing-admin:
+    build: billing_admin_panel
+    container_name: billing-admin
+    env_file:
+      - .env
+    environment:
+      POSTGRES_USER: ${BILLING_DB_USER}
+      POSTGRES_PASSWORD: ${BILLING_DB_PASSWORD}
+      POSTGRES_DB: ${BILLING_DB_NAME}
+    volumes:
+      - ./billing_admin_panel:/code
+      - static_volume_billing:${DJANGO_STATIC_PATH}
+    depends_on:
+      billing-db:
+        condition: service_healthy
+
+networks:
+  elk:
+    driver: bridge
+
+volumes:
+  es_logs_data:
+  content_db:
+  static_volume:
+  flasgger_static_volume:
+  auth_db:
+  kafka_0_data:
+  kafka_1_data:
+  kafka_2_data:
+  db-sentry-data:
+  redis-for-sentry-data:
+  sentry-data:
+  notification_db:
+  url-shortener-db:
+  billing_db:
+  static_volume_billing:

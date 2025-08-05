@@ -1,0 +1,48 @@
+services:
+  nginx:
+    image: nginx:alpine
+    container_name: nginx
+    env_file:
+      - .env
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf
+      - static_volume:/app/staticfiles:ro
+    depends_on:
+      - web
+    ports:
+      - "${NGINX_PORT}:${NGINX_PORT}"
+    restart: always
+
+  db:
+    image: postgres:16
+    env_file: .env
+    volumes:
+      - postgres_data:/var/lib/postgresql/data/
+      - ./database.ddl:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "${NOTIFICATION_DB_PORT}:${NOTIFICATION_DB_PORT}"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "sh -c 'pg_isready -U ${NOTIFICATION_DB_USER} -d ${NOTIFICATION_DB_NAME} -p ${NOTIFICATION_DB_PORT}'",
+        ]
+      interval: 10s
+      timeout: 30s
+      retries: 50
+
+  web:
+    build: ./app
+    env_file: .env
+    volumes:
+      - ./app:/app
+      - static_volume:/app/staticfiles
+    ports:
+      - "${DJANGO_ADMIN_PORT}:${DJANGO_ADMIN_PORT}"
+    depends_on:
+      - db
+      - redis
+
+volumes:
+  postgres_data:
+  static_volume:
